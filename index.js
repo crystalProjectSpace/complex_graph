@@ -1,21 +1,32 @@
 const { Worker } = require('node:worker_threads')
 const { writeFile } = require('node:fs/promises')
 
-nCols = 3
-nRows = 2
-
-const nWorkers = nCols * nRows
-
 const WORKER_PATH = './test_worker.js'
 
-const GRID_SIZE_X = 180
-const GRID_SIZE_Y = 150
+const TEST_GRID = {
+	gridSizeX: 420,
+	gridSizeY: 240,
+	nCols: 6,
+	nRows: 5
+}
 
-const commonDataItem = new SharedArrayBuffer(GRID_SIZE_X * GRID_SIZE_Y)
-const view = new Uint8Array(commonDataItem)
-
-const workerTest = []
-
+const MANDELBROT_AREA =	{
+	x0: -2.1,
+	x1: 1.1,
+	y0: -1.1,
+	y1: 1.1
+}
+/**
+* @description сформировать области для отрисовки фрактала
+* @param x0 - начало области отрисовки по OX
+* @param x1 - окончание области отрисовки по OX
+* @param y0 - начало области отрисовки по OY
+* @param y1 - окончание области отрисовки по OY
+* @param nX_total - разрешение результата по OX (количество точек)
+* @param nY_total - разрешение результата по OY (количество точек)
+* @param n_segments_X - количество секторов по OX
+* @param n_segments_Y - количество секторов по OY
+*/
 function processArea(x0, x1, y0, y1, nX_total, nY_total, n_segments_X, n_segments_Y) {
 	const nPoints = nX_total * nY_total
 	const nSegments = n_segments_X * n_segments_Y
@@ -62,37 +73,71 @@ function processArea(x0, x1, y0, y1, nX_total, nY_total, n_segments_X, n_segment
 	
 	return result
 }
-
-const grids = processArea(-2.1, 1.1, -1.1, 1.1, GRID_SIZE_X, GRID_SIZE_Y, nCols, nRows)
-
-for(let i = 0; i < nWorkers; i++) {
-	const workerThread = new Worker(WORKER_PATH)
-	const workerFulfillment = new Promise(resolve => {
-		workerThread.on('message', () => { 
-			workerThread.unref()
-			resolve(1)
+/**
+* @description сформировать набор воркеров для отрисовки фрактала и запитать их исходными данными
+* @param bufferView - общий массив , в котором идет отрисовка фрактала
+* @param fractalArea - описание сетки, на которую будет отображаться фрактал (разрешение и количество секторов)
+* @param renderArea - координаты "реального" пространства, в котором рисуется фрактал
+* @param workerPath - путь к скрипту формирования фрактала
+*/
+const createFractalRenderer = function(bufferView, fractalArea, renderArea, workerPath) {
+	const { gridSizeX, gridSizeY, nCols, nRows } = fractalArea
+	const { x0, x1, y0, y1 } = renderArea
+	
+	const nWorkers = nCols * nRows
+	
+	const grids = processArea(x0, x1, y0, y1, gridSizeX, gridSizeY, nCols, nRows)
+	const result = []
+	
+	for(let i = 0; i < nWorkers; i++) {
+		const workerThread = new Worker(WORKER_PATH)
+		const workerFulfillment = new Promise(resolve => {
+			workerThread.on('message', () => { 
+				workerThread.unref()
+				resolve(1)
+			})
+			workerThread.postMessage({ arr: bufferView, ...grids[i] })
 		})
-		workerThread.postMessage({ arr: view, ...grids[i] })
-	})
-	workerTest.push(workerFulfillment)
-}
-
-(async function() {
-	const result = await Promise.all(workerTest)
-	let res = ''
-	for(let i = 0; i < GRID_SIZE_Y; i++) {
-		const row = view.slice(i * GRID_SIZE_X, (i + 1) * GRID_SIZE_X)
-		res += Array.from(row).map(i => {
-			if (i < 5) return ' '
-			if (i < 10) return '.'
-			if (i < 25) return ','
-			if (i < 45) return '*'
-			if (i < 65) return '+'
-			if (i < 85) return 'x'
-			return '#'
-		}).join('') + '\n'
+		result.push(workerFulfillment)
 	}
 	
-	await writeFile('result.txt', res)
-	console.log('result saved')	
-})();
+	return result
+}
+
+const symbolicRender = function(value) {
+	if (value < 5) return ' '
+	if (value < 10) return '.'
+	if (value < 25) return ','
+	if (value < 45) return '*'
+	if (value < 65) return '+'
+	if (value < 85) return 'x'
+	return '#'
+}
+
+const createFractal = function(fractalArea, renderArea, renderFunction, workerPath) {
+	const dataSize = fractalArea.gridSizeX * fractalArea.gridSizeY
+	const commonDataItem = new SharedArrayBuffer(dataSize)
+	const view = new Uint8Array(commonDataItem)
+	const renderer = createFractalRenderer(view, fractalArea, renderArea, workerPath);
+	
+	(async function() {
+		const fractal = await Promise.all(renderer)
+		const { gridSizeX, gridSizeY } = fractalArea
+		let res = ''
+		let delta0 = 0
+		let delta1 = delta0 + gridSizeX
+		for(let i = 0; i < gridSizeY; i++) {
+			for(let j = delta0; j < delta1; j++) {
+				res += renderFunction(view[j])
+			}
+			delta0 += gridSizeX
+			delta1 += gridSizeX
+			res += '\n'
+		}
+		
+		await writeFile('result.txt', res)
+		console.log('result saved')	
+	})()
+}
+
+createFractal(TEST_GRID, MANDELBROT_AREA, symbolicRender, WORKER_PATH)
